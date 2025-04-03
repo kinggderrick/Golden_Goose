@@ -1,0 +1,11 @@
+{
+    "mt5": {
+        "login": 91440715,
+        "password": "_1ZkUzSj",
+        "server": "MetaQuotes-Demo",
+        "symbol": "XAUUSD",
+        "risk_per_trade": 0.01
+    },
+    "model_path": "models/drl_model.h5",
+    "scaler_path": "models/scaler.pkl"
+}
