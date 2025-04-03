@@ -1,26 +1,18 @@
-# Core Data & ML
-numpy==1.26.4          # Verified compatible with Python 3.11
-pandas==2.2.3          # Last version supporting Python 3.11
-tensorflow==2.16.1      # Official Windows build for 3.11
-scikit-learn==1.5.0     # Max version for 3.11 (your 1.5.2 didn't exist)
-joblib==1.4.2          # Required for sklearn
-
-# Trading & Execution
-MetaTrader5==5.0.4874   # Latest Windows build (2024-06-25)
-cachetools==5.3.3       # Compatible with all Python 3.x
-
-# Reinforcement Learning
-stable-baselines3==2.4.0  # Compatible with TF 2.16
-gymnasium==0.29.1        # Modern gym replacement
-           
-
-# System & Optimization
-psutil==5.9.8            # Windows process management
-numba==0.59.0            # Latest with 3.11 support
-
-# Security & Serialization
-cryptography==42.0.7     # Security-critical update
-protobuf==3.20.3         # TF 2.16 requirement
-h5py==3.11.0             # Model persistence
-pywin32==306             # Windows system integration
-certifi==2024.6.2        # Updated CA bundle
+cachetools>=5.5.2
+certifi>=2025.1.31
+cryptography>=44.0.2
+gymnasium>=1.1.1
+h5py>=3.13.0
+llvmlite>=0.44.0
+ml-dtypes>=0.5.1
+numba>=0.61.0
+numpy>=1.26.4
+protobuf==3.20.3
+psutil>=7.0.0
+pywin32>=310
+scikit-learn>=1.6.1
+stable_baselines3>=2.6.0
+sympy>=1.13.3
+tensorboard>=2.19.0
+tensorflow>=2.19.0
+tensorflow-intel>=2.18.0

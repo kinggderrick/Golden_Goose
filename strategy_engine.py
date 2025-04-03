@@ -54,8 +54,9 @@ class HybridStrategy:
             (current['rsi'] < 30) &                  # Mean reversion oversold
             (current['close'] < current['lower_bb']) & # Bollinger band trigger
             (current['macd'] > current['macd_signal']) & # Momentum confirmation
-            (current['volume'] > current['volume_ma'])   # Volume surge
-            (current['h4_rsi'] > 40) )                  # Higher timeframe filter
+            (current['volume'] > current['volume_ma']) &   # Volume surge
+            (current['h4_rsi'] > 40)                   # Higher timeframe filter
+        )
             
         # Researched Short Conditions
         short_entry = (
@@ -63,6 +64,7 @@ class HybridStrategy:
             (current['close'] > current['upper_bb']) & # Bollinger band trigger
             (current['macd'] < current['macd_signal']) & # Momentum confirmation
             (df['volume'].iloc[-3:].mean() > df['volume'].mean()) & # Volume pattern
-            (current['h4_rsi'] < 60) )                  # HTF filter
+            (current['h4_rsi'] < 60)                   # HTF filter
+        )
             
         return bool(long_entry), bool(short_entry)
