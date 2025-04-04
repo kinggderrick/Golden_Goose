@@ -1,9 +1,10 @@
 ﻿import os
 import sys
+import time  # Added missing import
 import numpy as np
 import pandas as pd
 import MetaTrader5 as mt5
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.pipeline import Pipeline
 import joblib
 import argparse
@@ -11,7 +12,6 @@ import logging
 from datetime import datetime
 import json
 import shutil
-from features import VolatilityAdjuster
 
 # Configure advanced logging
 logging.basicConfig(
@@ -19,6 +19,45 @@ logging.basicConfig(
     format='%(asctime)s.%(msecs)03d - %(levelname)s - %(module)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# Custom transformer class implementation (moved from features.py)
+class VolatilityAdjuster:
+    """Adjusts feature scaling based on volatility regimes"""
+    
+    def __init__(self):
+        self.volatility_baseline = None
+    
+    def fit(self, X, y=None, volatility=None):
+        """Store baseline volatility for comparison"""
+        if volatility is None:
+            # Default to range-based volatility if not provided
+            self.volatility_baseline = np.mean(np.max(X, axis=0) - np.min(X, axis=0))
+        else:
+            self.volatility_baseline = np.mean(volatility)
+        return self
+    
+    def transform(self, X, volatility=None):
+        """Apply volatility-based adjustment"""
+        if self.volatility_baseline is None:
+            return X  # No adjustment if not fitted
+            
+        if volatility is None:
+            # No current volatility provided, use identity transform
+            return X
+            
+        # Calculate adjustment factor
+        current_vol = np.mean(volatility)
+        vol_ratio = current_vol / self.volatility_baseline
+        
+        # Dampen extreme volatility (prevent excessive scaling)
+        adjustment = np.clip(1.0 / vol_ratio, 0.5, 2.0)
+        
+        # Apply adjustment
+        return X * adjustment
+    
+    def fit_transform(self, X, y=None, volatility=None):
+        """Convenience method for fit+transform"""
+        return self.fit(X, y, volatility).transform(X, volatility)
 
 class ScalerFactory:
     """Optimized scaler creator with market regime detection"""
@@ -97,12 +136,13 @@ class ScalerFactory:
         high_vol = df[df['volatility'] > df['volatility'].quantile(0.75)]
         low_vol = df[df['volatility'] < df['volatility'].quantile(0.25)]
         
-        # Create composite scaler
+        # Create composite scaler with RobustScaler for better outlier handling
         pipeline = Pipeline([
-            ('scaler', StandardScaler()),
-            ('volatility_adjust', VolatilityAdjuster())  # Custom class
+            ('scaler', RobustScaler()),  # Changed to RobustScaler for better handling of market extremes
+            ('volatility_adjust', VolatilityAdjuster())  # Using implemented class
         ])
         
+        # Fit on all data with volatility information
         pipeline.fit(
             df[['open', 'high', 'low', 'close']].values,
             volatility_adjust__volatility=df['volatility'].values  # Pass volatility to VolatilityAdjuster

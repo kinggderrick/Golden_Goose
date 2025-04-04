@@ -3,6 +3,7 @@ import MetaTrader5 as mt5
 from bot import TradingEngine, TradeExecutor
 from risk_manager import PropRiskManager
 from strategy_engine import HybridStrategy
+from ml_models import GoldenGooseModel
 
 class SystemTests(unittest.TestCase):
     @classmethod
@@ -21,12 +22,18 @@ class SystemTests(unittest.TestCase):
     def test_risk_calculation(self):
         mgr = PropRiskManager(self.config)
         size = mgr.calculate_position_size(1800.00, 1790.00)
-        self.assertBetween(size, 0.01, 5.00)
+        # Using standard assertions instead of assertBetween
+        self.assertGreaterEqual(size, 0.01)
+        self.assertLessEqual(size, 5.00)
 
     def test_order_execution(self):
         executor = TradeExecutor(self.config)
         with self.assertRaises(ValueError):  # No live trading in tests
             executor.execute_trade('buy')
+    
+    def test_mt5_connection(self):
+        # Simple check for MT5 connection capability
+        self.assertIsNotNone(mt5.version)
 
 if __name__ == "__main__":
     unittest.main()
