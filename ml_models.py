@@ -1,87 +1,71 @@
 import tensorflow as tf
 import numpy as np
 import pandas as pd
-import os
 import joblib
-from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, FunctionTransformer
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+class ConfidenceScaler:
+    """Custom feature engineering for confidence tiers"""
+    def __init__(self):
+        self.volatility_baseline = None
+        
+    def fit(self, X, y=None):
+        self.volatility_baseline = np.mean(X[:, 3])  # Index 3 = volatility
+        return self
+        
+    def transform(self, X):
+        X_new = X.copy()
+        X_new[:, 0] /= 100  # RSI
+        X_new[:, 1] *= 100  # MACD
+        X_new[:, 3] /= self.volatility_baseline  # Volatility
+        return X_new
 
 class GoldenGooseModel:
-    """ML model for signal confirmation with confidence scores"""
-    
-    def __init__(self, model_path="models/drl_model.h5", scaler_path="models/scaler.pkl"):
-        self.model_path = model_path
-        self.scaler_path = scaler_path
-        self.model = None
-        self.scaler = None
-        self.load_model()
-        
-    def load_model(self):
-        """Load the model and scaler with error handling"""
+    def __init__(self, model_path="models/drl_model.h5"):
+        self.model = self._load_model(model_path)
+        self.scaler = Pipeline([
+            ('confidence', ConfidenceScaler()),
+            ('standard', StandardScaler())
+        ])
+
+    def _load_model(self, path):
         try:
-            if os.path.exists(self.model_path):
-                self.model = tf.keras.models.load_model(self.model_path)
-            else:
-                # Fallback to simplified model if file doesn't exist
-                self.create_fallback_model()
-                
-            if os.path.exists(self.scaler_path):
-                self.scaler = joblib.load(self.scaler_path)
-            else:
-                self.scaler = StandardScaler()
-        except Exception as e:
-            print(f"Model loading error: {str(e)}")
-            self.create_fallback_model()
-            self.scaler = StandardScaler()
-    
-    def create_fallback_model(self):
-        """Create a simple model as fallback"""
+            return tf.keras.models.load_model(path)
+        except:
+            return self._create_fallback_model()
+
+    def _create_fallback_model(self):
         model = tf.keras.Sequential([
-            tf.keras.layers.Dense(64, activation='relu', input_shape=(10,)),
-            tf.keras.layers.Dropout(0.2),
+            tf.keras.layers.Dense(64, activation='relu', input_shape=(40,)),
+            tf.keras.layers.Dropout(0.3),
             tf.keras.layers.Dense(32, activation='relu'),
             tf.keras.layers.Dense(2, activation='sigmoid')
         ])
         model.compile(optimizer='adam', loss='binary_crossentropy')
-        self.model = model
-    
+        return model
+
     def preprocess_data(self, df: pd.DataFrame) -> np.ndarray:
-        """Extract and prepare features for model input"""
-        # Extract relevant features
+        """Feature engineering pipeline"""
         features = np.column_stack([
-            df['rsi'].values[-10:],          # Last 10 RSI values
-            df['macd'].values[-10:],         # Last 10 MACD values
-            df['h4_rsi'].values[-5:],        # Last 5 4H RSI values
-            df['close'].pct_change().values[-10:],  # Last 10 price changes
-            df['volume'].values[-5:] / df['volume'].mean()  # Volume normalization
+            df['rsi'].values[-10:],
+            df['macd'].values[-10:],
+            df['h4_rsi'].values[-5:],
+            df['daily_vol'].values[-5:],
+            df['volume'].values[-5:] / df['volume'].mean()
         ])
-        
-        # Handle potential NaN values
-        features = np.nan_to_num(features, nan=0.0)
-        
-        # Reshape for model input
-        return features.reshape(1, -1)
-    
+        return self.scaler.fit_transform(features.reshape(1, -1))
+
     def predict_signal(self, features: np.ndarray) -> dict:
-        """Generate signal with confidence scores"""
-        if self.model is None:
-            return {'buy_confidence': 0.0, 'sell_confidence': 0.0}
-        
-        try:
-            # Dimension check and adjustment
-            if features.shape[1] != 10 and self.model.input_shape[1] == 10:
-                # Pad or truncate to match expected input shape
-                padded = np.zeros((features.shape[0], 10))
-                padded[:, :min(features.shape[1], 10)] = features[:, :min(features.shape[1], 10)]
-                features = padded
-                
-            # Get predictions
-            pred = self.model.predict(features, verbose=0)
-            
-            # Format output as confidence scores
-            return {
-                'buy_confidence': float(pred[0][0]),
-                'sell_confidence': float(pred[0][1]) if pred.shape[1] > 1 else 1 - float(pred[0][0])
-            }
-        except Exception as e:
-            print(f"Prediction error: {str(e)}")
-            return {'buy_confidence': 0.0, 'sell_confidence': 0.0}
+        """Return confidence scores for both directions"""
+        pred = self.model.predict(features, verbose=0)
+        return {
+            'buy_confidence': float(pred[0][0]),
+            'sell_confidence': float(pred[0][1])
+        }

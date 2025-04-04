@@ -1,44 +1,109 @@
 import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
+from typing import Optional, Tuple
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler('risk.log'), logging.StreamHandler()]
+)
 
 class RiskLimitExceeded(Exception):
-    """Exception raised when risk limits are breached"""
+    """Custom exception for risk threshold breaches"""
     pass
 
 class PropRiskManager:
+    """Advanced risk manager with 3-tier confidence system"""
+    
     def __init__(self, config: dict):
         self.config = config
         self.consecutive_losses = 0
         self.consecutive_wins = 0
-        self.max_daily_loss = -0.05
-        self.max_drawdown = -0.10
+        self.max_daily_loss = -0.05  # -5%
+        self.max_drawdown = -0.10    # -10%
         self.daily_trades = []
-        self.max_daily_trades = 5  # Prop firm compliance
+        self.max_daily_trades = 5    # Prop firm limit
+        self.confidence_level = "CONFIDENT"  # Default tier
+        self.risk_params = {
+            "SUPER": {"risk_pct": 0.018, "rr_ratio": 3.0, "sl_mult": 1.5},
+            "CONFIDENT": {"risk_pct": 0.008, "rr_ratio": 2.0, "sl_mult": 2.0},
+            "HOLD": {"risk_pct": 0.0, "rr_ratio": 0.0, "sl_mult": 0.0}
+        }
 
-    def calculate_position_size(self, entry_price: float, stop_price: float) -> float:
-        """ATR-based dynamic sizing with 2% risk rule"""
-        # Calculate pip distance between entry and stop
-        pip_distance = abs(entry_price - stop_price)
-        if pip_distance == 0:
-            return 0.01  # Minimum position size as safety
+    def set_confidence_level(self, tier: str):
+        """Set current market confidence tier
+        Args:
+            tier (str): SUPER/CONFIDENT/HOLD
+        """
+        self.confidence_level = tier.upper()
+        logging.info(f"Risk level set to: {self.confidence_level}")
+
+    def calculate_position_size(self, entry_price: float, 
+                              stop_price: float,
+                              balance: float) -> Tuple[float, float, float]:
+        """Calculate tier-based position size with dynamic stops
+        
+        Args:
+            entry_price: Proposed entry price
+            stop_price: Initial stop price
+            balance: Current account balance
             
-        # Get risk amount
-        risk_amount = self._get_risk_amount()
-        
-        # Calculate position size based on risk
-        position_size = risk_amount / pip_distance
-        
-        # Validate against min/max sizes
+        Returns:
+            tuple: (lot_size, adjusted_sl, take_profit)
+        """
+        try:
+            params = self.risk_params.get(self.confidence_level, 
+                                        self.risk_params["HOLD"])
+            
+            if params["risk_pct"] <= 0:
+                return 0.0, 0.0, 0.0
+
+            # Calculate risk-adjusted position size
+            risk_amount = balance * params["risk_pct"]
+            atr = self._calculate_atr(period=14)
+            price = self._get_current_price()
+            
+            # Calculate dynamic stop loss
+            sl_distance = atr * params["sl_mult"]
+            adjusted_sl = entry_price - sl_distance if entry_price > stop_price \
+                        else entry_price + sl_distance
+                        
+            # Calculate lot size
+            pip_value = 1.0  # Default for XAUUSD
+            if self.config['symbol'] in ['EURUSD', 'GBPUSD']:
+                pip_value = 0.0001
+                
+            lot_size = round(risk_amount / (sl_distance / pip_value), 2)
+            
+            # Apply symbol constraints
+            lot_size = self._apply_lot_limits(lot_size)
+            
+            # Calculate take profit
+            tp_distance = sl_distance * params["rr_ratio"]
+            take_profit = entry_price + tp_distance if entry_price > stop_price \
+                        else entry_price - tp_distance
+
+            return lot_size, adjusted_sl, take_profit
+
+        except Exception as e:
+            logging.error(f"Position calc error: {str(e)}")
+            return 0.0, 0.0, 0.0
+
+    def _apply_lot_limits(self, lot_size: float) -> float:
+        """Apply exchange/symbol lot size constraints"""
         symbol_info = mt5.symbol_info(self.config['symbol'])
-        if symbol_info:
-            min_lot = symbol_info.volume_min
-            max_lot = min(symbol_info.volume_max, 5.0)  # Cap at 5 lots for prop compliance
-            position_size = max(min_lot, min(position_size, max_lot))
-        
-        return round(position_size, 2)
+        if not symbol_info:
+            return round(lot_size, 2)
+            
+        min_lot = symbol_info.volume_min
+        max_lot = min(symbol_info.volume_max, 5.0)  # Hard cap
+        return np.clip(lot_size, min_lot, max_lot)
 
     def _calculate_atr(self, period: int) -> float:
+        """Calculate current ATR with fallback"""
         try:
             rates = mt5.copy_rates_from_pos(
                 self.config['symbol'], 
@@ -47,99 +112,35 @@ class PropRiskManager:
                 period+1
             )
             
-            if rates is None or len(rates) < period:
-                return 0.001 * self._get_current_price()  # Fallback to 0.1% of price
+            if not rates or len(rates) < period:
+                return 0.001 * self._get_current_price()
                 
             df = pd.DataFrame(rates)
-            df['prev_close'] = df['close'].shift(1)
-            df['tr'] = df.apply(
-                lambda x: max(
-                    x['high'] - x['low'],
-                    abs(x['high'] - x['prev_close']),
-                    abs(x['low'] - x['prev_close'])
-                ),
-                axis=1
-            )
+            return talib.ATR(df['high'], df['low'], df['close'], period)[-1]
             
-            return df['tr'].mean()
         except Exception as e:
-            print(f"ATR calculation error: {str(e)}")
-            return 0.001 * self._get_current_price()  # Fallback to 0.1% of price
+            logging.warning(f"ATR calc failed: {str(e)}")
+            return 0.001 * self._get_current_price()
 
     def _get_current_price(self) -> float:
-        """Get current price with fallback"""
-        tick = mt5.symbol_info_tick(self.config['symbol'])
-        if tick:
+        """Get current price with redundancy"""
+        try:
+            tick = mt5.symbol_info_tick(self.config['symbol'])
             return (tick.bid + tick.ask) / 2
-        return 1000.0  # Arbitrary fallback for gold
-
-    def _get_risk_amount(self) -> float:
-        """Adaptive risk based on performance streak"""
-        try:
-            base_risk = self.config.get('risk_per_trade', 0.02)  # Default 2%
-            account_info = mt5.account_info()
-            
-            if account_info is None:
-                return 500.0  # Fallback risk amount
-                
-            equity = account_info.equity
-            
-            # Daily drawdown check
-            if self._calculate_daily_drawdown() <= self.max_daily_loss:
-                raise RiskLimitExceeded(f"Daily loss limit {self.max_daily_loss*100}% reached")
-            
-            # Adaptive risk based on streak
-            if self.consecutive_losses >= 2:
-                return min(base_risk * 0.5 * equity, 0.01 * equity)
-            if self.consecutive_wins >= 3:
-                return min(base_risk * 1.5 * equity, 0.03 * equity)
-                
-            return base_risk * equity
-        except RiskLimitExceeded:
-            raise
-        except Exception as e:
-            print(f"Risk calculation error: {str(e)}")
-            return 500.0  # Fallback risk amount
-
-    def _calculate_daily_drawdown(self) -> float:
-        """Calculate intraday drawdown"""
-        try:
-            # Get today's closed positions
-            from datetime import datetime
-            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            # Filter today's positions
-            today_profits = sum(trade.profit for trade in self.daily_trades)
-            
-            account_info = mt5.account_info()
-            if account_info is None:
-                return 0.0
-                
-            # Calculate drawdown percentage
-            starting_balance = account_info.balance - today_profits
-            current_equity = account_info.equity
-            
-            if starting_balance == 0:
-                return 0.0
-                
-            return (current_equity - starting_balance) / starting_balance
-        except Exception as e:
-            print(f"Daily drawdown calculation error: {str(e)}")
-            return 0.0
+        except:
+            return mt5.symbol_info(self.config['symbol']).last
 
     def update_trade_history(self, profit: float):
-        """Track performance streaks and drawdown"""
-        from datetime import datetime
-        
-        # Add to daily trades
+        """Update performance metrics after trade"""
         self.daily_trades.append({
-            'time': datetime.now(),
-            'profit': profit
+            'time': pd.Timestamp.now(),
+            'profit': profit,
+            'confidence': self.confidence_level
         })
         
-        # Clean old trades (keep only today)
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        self.daily_trades = [t for t in self.daily_trades if t['time'] >= today]
+        # Maintain 24h rolling window
+        self.daily_trades = [t for t in self.daily_trades 
+                           if pd.Timestamp.now() - t['time'] < pd.Timedelta(hours=24)]
         
         # Update streaks
         if profit > 0:
@@ -148,19 +149,39 @@ class PropRiskManager:
         else:
             self.consecutive_losses += 1
             self.consecutive_wins = 0
+            
+        self._enforce_risk_limits()
 
-        # Check max daily trades
+    def _enforce_risk_limits(self):
+        """Check all risk boundaries"""
         if len(self.daily_trades) >= self.max_daily_trades:
-            raise RiskLimitExceeded(f"Maximum daily trades limit ({self.max_daily_trades}) reached")
+            raise RiskLimitExceeded(f"Max daily trades ({self.max_daily_trades}) reached")
+            
+        drawdown = self._calculate_drawdown()
+        if drawdown < self.max_drawdown:
+            raise RiskLimitExceeded(f"Max drawdown ({self.max_drawdown*100}%) breached")
+            
+        daily_pnl = sum(t['profit'] for t in self.daily_trades)
+        if daily_pnl < self.max_daily_loss * self.config.get('balance', 10000):
+            raise RiskLimitExceeded("Daily loss limit reached")
 
-        # Check drawdown
-        try:
-            account_info = mt5.account_info()
-            if account_info:
-                current_drawdown = (account_info.equity - account_info.balance) / account_info.balance
-                if current_drawdown < self.max_drawdown:
-                    raise RiskLimitExceeded(f"Max drawdown {self.max_drawdown*100}% breached")
-        except RiskLimitExceeded:
-            raise
-        except Exception as e:
-            print(f"Drawdown check error: {str(e)}")
+    def _calculate_drawdown(self) -> float:
+        """Calculate current portfolio drawdown"""
+        balance = self.config.get('balance', 10000)
+        equity = balance + sum(t['profit'] for t in self.daily_trades)
+        return (equity - balance) / balance
+
+# Example usage
+if __name__ == "__main__":
+    config = {'symbol': 'XAUUSD', 'balance': 10000}
+    risk_mgr = PropRiskManager(config)
+    
+    # Super confident trade
+    risk_mgr.set_confidence_level("SUPER")
+    lot_size, sl, tp = risk_mgr.calculate_position_size(1800, 1795, 10000)
+    print(f"SUPER: {lot_size} lots, SL: {sl}, TP: {tp}")
+    
+    # Confident trade
+    risk_mgr.set_confidence_level("CONFIDENT")
+    lot_size, sl, tp = risk_mgr.calculate_position_size(1800, 1795, 10000)
+    print(f"CONFIDENT: {lot_size} lots, SL: {sl}, TP: {tp}")
